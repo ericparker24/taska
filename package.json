@@ -1,15 +1,16 @@
 {
   "name": "taska-api",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "Taska Platform — Hono API on Cloudflare Workers",
-  "main": "src/index.ts",
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
+    "build": "wrangler deploy --dry-run",
     "type-check": "tsc --noEmit"
   },
   "dependencies": {
     "hono": "^4.4.0",
+    "@hono/zod-validator": "^0.2.2",
     "@supabase/supabase-js": "^2.43.0",
     "zod": "^3.23.8"
   },
