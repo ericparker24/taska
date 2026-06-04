@@ -1,0 +1,19 @@
+name = "taska-api"
+main = "src/index.ts"
+compatibility_date = "2024-06-01"
+compatibility_flags = ["nodejs_compat"]
+
+[vars]
+ENVIRONMENT = "production"
+
+# Secrets (set via: wrangler secret put SECRET_NAME)
+# SUPABASE_URL
+# SUPABASE_SERVICE_ROLE_KEY
+# PAWAPAY_API_KEY
+# PAWAPAY_CORRESPONDENT_ID
+# FLUTTERWAVE_SECRET_KEY
+# DAILY_API_KEY
+
+[[routes]]
+pattern = "api.taska.africa/*"
+zone_name = "taska.africa"
