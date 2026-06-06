@@ -7,7 +7,60 @@ import type { Env } from '../types'
 
 const providers = new Hono<{ Bindings: Env }>()
 
-// All provider routes require authentication
+// -------------------------------------------------------
+// GET /providers/search
+// PUBLIC — no auth required
+// -------------------------------------------------------
+providers.get('/search', async (c) => {
+  const supabase = getSupabase(c.env)
+
+  const query = c.req.query('q') ?? ''
+  const lat = parseFloat(c.req.query('lat') ?? '0')
+  const lng = parseFloat(c.req.query('lng') ?? '0')
+  const radius = parseInt(c.req.query('radius') ?? '5000')  // metres, default 5km
+  const minRating = parseFloat(c.req.query('min_rating') ?? '0')
+
+  const dbQuery = supabase
+    .from('providers')
+    .select(`
+      id,
+      business_name,
+      bio,
+      rating_average,
+      jobs_completed,
+      response_time_minutes,
+      subscription_tier,
+      users!inner (full_name, country_code),
+      provider_services (
+        price_from, price_to, price_unit,
+        services (name, category)
+      ),
+      provider_badges (badge_type)
+    `)
+    .eq('is_live', true)
+    .eq('is_verified', true)
+    .gte('rating_average', minRating)
+    .order('rating_average', { ascending: false })
+    .limit(20)
+
+  const { data: results, error } = await dbQuery
+
+  if (error) {
+    return c.json({ success: false, error: 'Search failed', code: 'DB_ERROR' }, 500)
+  }
+
+  return c.json({
+    success: true,
+    data: {
+      results: results ?? [],
+      count: results?.length ?? 0,
+    }
+  })
+})
+
+// -------------------------------------------------------
+// All routes below require authentication
+// -------------------------------------------------------
 providers.use('*', requireAuth)
 
 // -------------------------------------------------------
@@ -54,13 +107,11 @@ providers.post(
     const { full_name, business_name, bio } = c.req.valid('json')
     const supabase = getSupabase(c.env)
 
-    // Update user's full name
     await supabase
       .from('users')
       .update({ full_name })
       .eq('id', userId)
 
-    // Create provider record (starts at step: id_upload)
     const { data: provider, error } = await supabase
       .from('providers')
       .upsert({
@@ -79,7 +130,6 @@ providers.post(
       return c.json({ success: false, error: 'Could not create provider profile', code: 'DB_ERROR' }, 500)
     }
 
-    // Update user role to provider
     await supabase
       .from('users')
       .update({ role: 'provider' })
@@ -98,8 +148,7 @@ providers.post(
 
 // -------------------------------------------------------
 // POST /providers/onboard/id-upload
-// Step 2: Upload national ID (Ghana Card, Passport, Voter ID)
-// Returns a signed upload URL for Supabase Storage
+// Step 2: Upload national ID
 // -------------------------------------------------------
 providers.post(
   '/onboard/id-upload',
@@ -113,7 +162,6 @@ providers.post(
     const { file_name, file_type, id_type } = c.req.valid('json')
     const supabase = getSupabase(c.env)
 
-    // Generate signed upload URL for private provider-ids bucket
     const filePath = `${userId}/${id_type}_${Date.now()}_${file_name}`
     const { data, error } = await supabase.storage
       .from('provider-ids')
@@ -123,7 +171,6 @@ providers.post(
       return c.json({ success: false, error: 'Could not generate upload URL', code: 'STORAGE_ERROR' }, 500)
     }
 
-    // Mark step as in progress
     await supabase
       .from('providers')
       .update({ verification_step: 'face_match' })
@@ -155,7 +202,6 @@ providers.post(
     const { service_ids } = c.req.valid('json')
     const supabase = getSupabase(c.env)
 
-    // Get provider record
     const { data: provider } = await supabase
       .from('providers')
       .select('id')
@@ -166,7 +212,6 @@ providers.post(
       return c.json({ success: false, error: 'Start onboarding first', code: 'NOT_FOUND' }, 404)
     }
 
-    // Remove old selections, insert new ones
     await supabase
       .from('provider_services')
       .delete()
@@ -210,7 +255,7 @@ providers.post(
   zValidator('json', z.object({
     pricing: z.array(z.object({
       service_id: z.string().uuid(),
-      price_from: z.number().int().positive(),   // in pesewas
+      price_from: z.number().int().positive(),
       price_to: z.number().int().positive().optional(),
       price_unit: z.enum(['fixed', 'per_hour', 'per_day', 'negotiable']),
       description: z.string().max(200).optional(),
@@ -231,7 +276,6 @@ providers.post(
       return c.json({ success: false, error: 'Provider profile not found', code: 'NOT_FOUND' }, 404)
     }
 
-    // Update pricing on each provider_service record
     for (const item of pricing) {
       await supabase
         .from('provider_services')
@@ -245,7 +289,6 @@ providers.post(
         .eq('service_id', item.service_id)
     }
 
-    // All 7 steps complete — go LIVE
     const { error } = await supabase
       .from('providers')
       .update({
@@ -269,56 +312,5 @@ providers.post(
     })
   }
 )
-
-// -------------------------------------------------------
-// GET /providers/search
-// Public search — no auth required (removed requireAuth for this route)
-// -------------------------------------------------------
-providers.get('/search', async (c) => {
-  const supabase = getSupabase(c.env)
-
-  const query = c.req.query('q') ?? ''
-  const lat = parseFloat(c.req.query('lat') ?? '0')
-  const lng = parseFloat(c.req.query('lng') ?? '0')
-  const radius = parseInt(c.req.query('radius') ?? '5000')  // metres, default 5km
-  const minRating = parseFloat(c.req.query('min_rating') ?? '0')
-
-  let dbQuery = supabase
-    .from('providers')
-    .select(`
-      id,
-      business_name,
-      bio,
-      rating_average,
-      jobs_completed,
-      response_time_minutes,
-      subscription_tier,
-      users!inner (full_name, country_code),
-      provider_services (
-        price_from, price_to, price_unit,
-        services (name, category)
-      ),
-      provider_badges (badge_type)
-    `)
-    .eq('is_live', true)
-    .eq('is_verified', true)
-    .gte('rating_average', minRating)
-    .order('rating_average', { ascending: false })
-    .limit(20)
-
-  const { data: results, error } = await dbQuery
-
-  if (error) {
-    return c.json({ success: false, error: 'Search failed', code: 'DB_ERROR' }, 500)
-  }
-
-  return c.json({
-    success: true,
-    data: {
-      results: results ?? [],
-      count: results?.length ?? 0,
-    }
-  })
-})
 
 export { providers as providerRoutes }
