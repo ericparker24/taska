@@ -79,6 +79,55 @@ export function getAbandonmentRefundAt(lastActivityAt: Date): Date {
 // False dispute penalty: GHS 50 = 5000 pesewas
 export const FALSE_DISPUTE_PENALTY_PESEWAS = 5_000
 
+// Rolling escrow: when milestone N is approved/released, the *next*
+// unfunded milestone should be prompted for funding — not the whole project.
+// Returns null if there's nothing left to fund (project complete).
+export function getNextMilestoneToFund(
+  milestones: { id: string; sequence: number; status: string }[]
+): { id: string; sequence: number } | null {
+  const unfunded = milestones
+    .filter(m => m.status === 'pending')
+    .sort((a, b) => a.sequence - b.sequence)
+  return unfunded.length ? { id: unfunded[0].id, sequence: unfunded[0].sequence } : null
+}
+
+// Project stalled check — Route 2 only.
+// No progress update AND no milestone status change in 14+ days.
+export function isProjectStalled(lastActivityAt: Date): boolean {
+  const fourteenDaysMs = 14 * 24 * 60 * 60 * 1000
+  return Date.now() - lastActivityAt.getTime() > fourteenDaysMs
+}
+
+// A milestone is overdue if its due_date has passed and it hasn't
+// reached a payment-resolution state yet. Released/withdrawal_requested
+// milestones are done or settling — being "late" no longer matters.
+const ACTIVE_MILESTONE_STATUSES = ['pending', 'funded', 'in_progress', 'evidence_submitted']
+export function isMilestoneOverdue(dueDate: string | null, status: string): boolean {
+  if (!dueDate || !ACTIVE_MILESTONE_STATUSES.includes(status)) return false
+  return new Date(dueDate) < new Date()
+}
+
+// Guarantor gate — a guarantor only needs to have *accepted* the role
+// (not necessarily completed registration/materials yet) before the
+// client can start funding milestones. Anything before 'accepted'
+// (invited, declined, timed_out) keeps the project blocked.
+const GUARANTOR_READY_STATUSES = [
+  'accepted', 'registered', 'materials_received',
+  'materials_purchased', 'job_confirmed', 'fee_paid',
+]
+export function isGuarantorReady(status: string): boolean {
+  return GUARANTOR_READY_STATUSES.includes(status)
+}
+
+// Cancellation auto-confirm rule:
+// If the other party doesn't respond within 48 hours, the
+// cancellation finalizes automatically (shorter than the 72hr
+// payment-release window since no funds are being released here —
+// just stopping the project).
+export function getCancellationConfirmAt(requestedAt: Date): Date {
+  return new Date(requestedAt.getTime() + 48 * 60 * 60 * 1000)
+}
+
 // Convert GHS ↔ pesewas
 export const ghsToPesewas  = (ghs: number)     => Math.round(ghs * 100)
 export const pesewasToGhs  = (pesewas: number) => pesewas / 100
