@@ -3,6 +3,7 @@ import { zValidator } from '@hono/zod-validator'
 import { z } from 'zod'
 import { getSupabase } from '../lib/supabase'
 import { requireAuth } from '../middleware/auth'
+import { isGuarantorReady } from '../lib/pricing'
 import type { Env } from '../types'
 
 const payments = new Hono<{ Bindings: Env }>()
@@ -17,25 +18,61 @@ payments.post(
   '/initiate',
   zValidator('json', z.object({
     booking_id: z.string().uuid(),
+    milestone_id: z.string().uuid().optional(),  // Route 2 rolling escrow — fund one milestone at a time
     phone: z.string().regex(/^\+[1-9]\d{7,14}$/),
     amount: z.number().int().positive(),  // in pesewas
     payment_type: z.enum(['escrow_deposit', 'labour_release', 'guarantor_fee']),
   })),
   async (c) => {
     const userId = c.get('userId')
-    const { booking_id, phone, amount, payment_type } = c.req.valid('json')
+    const { booking_id, milestone_id, phone, amount, payment_type } = c.req.valid('json')
     const supabase = getSupabase(c.env)
 
     // Verify booking belongs to user
     const { data: booking } = await supabase
       .from('bookings')
-      .select('id, status, total_amount')
+      .select('id, status, total_amount, booking_route')
       .eq('id', booking_id)
       .eq('client_id', userId)
       .single()
 
     if (!booking) {
       return c.json({ success: false, error: 'Booking not found', code: 'NOT_FOUND' }, 404)
+    }
+
+    // Guarantor gate — Route 2 is compulsory-guarantor. No milestone can be
+    // funded until the nominated guarantor has accepted the role, regardless
+    // of what the client app's UI allows — this is the server-side backstop.
+    if (booking.booking_route === 'route_2') {
+      const { data: guarantor } = await supabase
+        .from('guarantors')
+        .select('status')
+        .eq('booking_id', booking_id)
+        .single()
+
+      if (!guarantor || !isGuarantorReady(guarantor.status)) {
+        return c.json({
+          success: false,
+          error: 'Your nominated guarantor must accept their role before you can fund this project.',
+          code: 'GUARANTOR_NOT_READY',
+        }, 409)
+      }
+    }
+
+    if (milestone_id) {
+      const { data: milestone } = await supabase
+        .from('milestones')
+        .select('id, status, amount')
+        .eq('id', milestone_id)
+        .eq('booking_id', booking_id)
+        .single()
+
+      if (!milestone) {
+        return c.json({ success: false, error: 'Milestone not found', code: 'NOT_FOUND' }, 404)
+      }
+      if (milestone.status !== 'pending') {
+        return c.json({ success: false, error: 'Milestone is not awaiting funding', code: 'INVALID_STATUS' }, 400)
+      }
     }
 
     // Create pending payment record
@@ -45,6 +82,7 @@ payments.post(
       .insert({
         id: depositId,
         booking_id,
+        milestone_id: milestone_id ?? null,
         amount,
         payment_type,
         processor: 'pawapay',   // will update if failover
@@ -148,7 +186,7 @@ payments.post('/webhook/pawapay', async (c) => {
     .single()
 
   if (payment && paymentStatus === 'completed') {
-    await handlePaymentSuccess(payment.booking_id, payment.payment_type, payment.amount, supabase)
+    await handlePaymentSuccess(payment.booking_id, payment.payment_type, payment.amount, supabase, payment.milestone_id)
   }
 
   return c.json({ received: true }, 200)
@@ -185,7 +223,7 @@ payments.post('/webhook/flutterwave', async (c) => {
     .single()
 
   if (payment) {
-    await handlePaymentSuccess(payment.booking_id, payment.payment_type, payment.amount, supabase)
+    await handlePaymentSuccess(payment.booking_id, payment.payment_type, payment.amount, supabase, payment.milestone_id)
   }
 
   return c.json({ received: true }, 200)
@@ -285,19 +323,29 @@ async function handlePaymentSuccess(
   bookingId: string,
   paymentType: string,
   amount: number,
-  supabase: ReturnType<typeof import('../lib/supabase').getSupabase>
+  supabase: ReturnType<typeof import('../lib/supabase').getSupabase>,
+  milestoneId?: string | null
 ) {
   if (paymentType === 'escrow_deposit') {
-    await supabase
-      .from('bookings')
-      .update({ status: 'in_progress' })
-      .eq('id', bookingId)
-
     const { data: booking } = await supabase
       .from('bookings')
-      .select('provider_id, client_id')
+      .select('provider_id, client_id, status')
       .eq('id', bookingId)
       .single()
+
+    if (milestoneId) {
+      // Route 2 rolling escrow — fund this milestone only.
+      await supabase.from('milestones').update({
+        status: 'funded',
+        funded_at: new Date().toISOString(),
+      }).eq('id', milestoneId)
+    }
+
+    // Move the booking itself to in_progress once at least one milestone is funded
+    // (idempotent — harmless if it's already in_progress for a later milestone).
+    if (booking?.status === 'pending' || booking?.status === 'accepted') {
+      await supabase.from('bookings').update({ status: 'in_progress' }).eq('id', bookingId)
+    }
 
     if (booking) {
       await supabase.from('notifications').insert([
@@ -305,8 +353,10 @@ async function handlePaymentSuccess(
           user_id: booking.provider_id,
           type: 'payment_received',
           title: 'Payment confirmed!',
-          body: 'Client has paid. You can now start the job.',
-          data: { booking_id: bookingId },
+          body: milestoneId
+            ? 'Client has funded this milestone. You can start this stage of the project.'
+            : 'Client has paid. You can now start the job.',
+          data: { booking_id: bookingId, milestone_id: milestoneId ?? null },
           is_read: false,
         },
         {
@@ -314,7 +364,7 @@ async function handlePaymentSuccess(
           type: 'payment_confirmed',
           title: 'Payment successful',
           body: 'Your payment is held in escrow. Work can now begin.',
-          data: { booking_id: bookingId },
+          data: { booking_id: bookingId, milestone_id: milestoneId ?? null },
           is_read: false,
         }
       ])
