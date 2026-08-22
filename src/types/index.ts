@@ -6,6 +6,10 @@
 // ============================================================
 
 export type Env = {
+  VAPID_PUBLIC_KEY: string
+  VAPID_PRIVATE_KEY: string
+  VAPID_SUBJECT: string
+  ADMIN_SECRET: string
   SUPABASE_URL: string
   SUPABASE_SERVICE_ROLE_KEY: string
   PAWAPAY_API_KEY: string
@@ -86,6 +90,7 @@ export type WalletTransaction = {
   id: string
   wallet_id: string
   booking_id: string | null
+  milestone_id: string | null    // ties escrow lock/release to a specific milestone (Route 2)
   amount: number                 // in pesewas — positive = credit, negative = debit
   transaction_type: WalletTransactionType
   description: string
@@ -114,9 +119,11 @@ export type BookingRoute = 'route_1' | 'route_2'
 export type BookingStatus =
   | 'pending'                    // waiting for provider to accept
   | 'accepted'                   // provider accepted
+  | 'awaiting_guarantor'         // Route 2 only — client must nominate & guarantor must accept before payment
   | 'payment_pending'            // waiting for client to pay into escrow
   | 'in_progress'                // payment confirmed, work started
   | 'withdrawal_requested'       // provider requested payment release
+  | 'cancellation_requested'     // either party requested early termination — awaiting consent
   | 'completed'                  // client confirmed, money released
   | 'disputed'                   // dispute raised, money frozen
   | 'auto_released'              // client silent 72hrs, auto-released to provider
@@ -148,6 +155,63 @@ export type Booking = {
 }
 
 // ============================================================
+// MILESTONE EXTENSION REQUEST — Reschedule a due_date, Route 2
+// Lighter-weight than a ChangeOrder since no money moves — just a
+// date. Provider requests, client approves/rejects.
+// ============================================================
+export type MilestoneExtensionStatus = 'pending' | 'approved' | 'rejected'
+
+export type MilestoneExtensionRequest = {
+  id: string
+  milestone_id: string
+  booking_id: string
+  requested_by: 'provider' | 'client'
+  current_due_date: string | null
+  new_due_date: string
+  reason: string
+  status: MilestoneExtensionStatus
+  created_at: string
+  resolved_at: string | null
+}
+
+// ============================================================
+// PROJECT MESSAGE — Three-way thread (client + provider + guarantor)
+// Route 2 only. One shared thread per booking so all three parties
+// see the same conversation — not separate 1:1 DMs that leave one
+// person out of the loop.
+// ============================================================
+export type ProjectMessageSenderRole = 'client' | 'provider' | 'guarantor'
+
+export type ProjectMessage = {
+  id: string
+  booking_id: string
+  sender_id: string
+  sender_role: ProjectMessageSenderRole
+  body: string
+  is_system: boolean             // true for auto-posted system messages (e.g. "Guarantor joined")
+  created_at: string
+}
+
+// ============================================================
+// CANCELLATION REQUEST — Mid-project early termination, Route 2
+// Either party requests → other party has a window to confirm or
+// dispute before it finalizes. Mirrors WithdrawalRequest's pattern
+// so neither side can unilaterally walk away with money in limbo.
+// ============================================================
+export type CancellationStatus = 'pending' | 'confirmed' | 'disputed' | 'withdrawn'
+
+export type CancellationRequest = {
+  id: string
+  booking_id: string
+  requested_by: 'client' | 'provider'
+  reason: string
+  status: CancellationStatus
+  requested_at: string
+  confirm_by: string              // requested_at + 48 hours — auto-confirms if other party is silent
+  resolved_at: string | null
+}
+
+// ============================================================
 // WITHDRAWAL REQUEST
 // Provider requests payment → client approves/denies
 // ============================================================
@@ -171,7 +235,8 @@ export type WithdrawalRequest = {
 // MILESTONE — Route 2 only
 // ============================================================
 export type MilestoneStatus =
-  | 'pending'
+  | 'pending'                    // created, awaiting client funding
+  | 'funded'                     // client has paid this milestone into escrow
   | 'in_progress'
   | 'evidence_submitted'
   | 'withdrawal_requested'
@@ -182,10 +247,12 @@ export type MilestoneStatus =
 export type Milestone = {
   id: string
   booking_id: string
+  sequence: number               // order within the project (1, 2, 3...)
   title: string
   amount: number                 // in pesewas — labour for this milestone
   status: MilestoneStatus
   evidence_score: number         // 0–100
+  funded_at: string | null
   due_date: string | null
   completed_at: string | null
   created_at: string
@@ -351,6 +418,7 @@ export type PaymentType =
 export type Payment = {
   id: string
   booking_id: string
+  milestone_id: string | null    // set for Route 2 — which milestone this deposit funds
   amount: number                 // in pesewas
   payment_type: PaymentType
   processor: PaymentProcessor
@@ -363,6 +431,41 @@ export type Payment = {
 }
 
 // ============================================================
+// PROJECT UPDATE — Freeform progress check-ins, Route 2 only
+// Not tied to milestone completion — keeps client informed
+// across multi-week/multi-month projects between milestones
+// ============================================================
+export type ProjectUpdate = {
+  id: string
+  booking_id: string
+  posted_by: 'provider' | 'client'
+  note: string
+  photo_urls: string[]
+  created_at: string
+}
+
+// ============================================================
+// CHANGE ORDER — Mid-project scope/price changes, Route 2 only
+// Either party proposes; both must accept before milestones
+// or total_amount are adjusted
+// ============================================================
+export type ChangeOrderStatus = 'proposed' | 'accepted' | 'rejected' | 'withdrawn'
+
+export type ChangeOrder = {
+  id: string
+  booking_id: string
+  proposed_by: 'client' | 'provider'
+  description: string
+  amount_delta: number            // in pesewas — can be negative (scope reduction)
+  new_milestone_titles: string[]  // optional new milestones this change order adds
+  status: ChangeOrderStatus
+  responded_by: 'client' | 'provider' | null
+  response_note: string | null
+  created_at: string
+  resolved_at: string | null
+}
+
+// ============================================================
 // DISPUTE
 // ============================================================
 export type DisputeStatus = 'open' | 'bot_resolving' | 'escalated' | 'resolved' | 'closed'
@@ -371,6 +474,7 @@ export type DisputeRaisedBy = 'client' | 'provider'
 export type Dispute = {
   id: string
   booking_id: string
+  milestone_id: string | null    // scopes dispute to one milestone — other milestones unaffected
   raised_by: DisputeRaisedBy
   reason: string
   denial_reason: string | null   // from withdrawal denial
@@ -398,6 +502,7 @@ export type RedFlagType =
   | 'client_bad_faith_denial'
   | 'duplicate_device'
   | 'external_payment_request'
+  | 'project_stalled'            // Route 2: no progress update or milestone activity in 14+ days
 
 export type RedFlag = {
   id: string
