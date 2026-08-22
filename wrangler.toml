@@ -5,3 +5,21 @@ compatibility_flags = ["nodejs_compat"]
 
 [vars]
 ENVIRONMENT = "production"
+VAPID_PUBLIC_KEY = "BO3U2xrhTRJk4v2yzG4NUm2C31RrdfdqUP4S7-ZYbWbNq7N6rLzeLrs2kyudjvl-LDHTE0Svr36MdyzM7T7Uhi4"
+VAPID_SUBJECT = "mailto:keap@taska.africa"
+
+# Secrets — set via: wrangler secret put SECRET_NAME
+# SUPABASE_URL
+# SUPABASE_SERVICE_ROLE_KEY
+# PAWAPAY_API_KEY
+# PAWAPAY_CORRESPONDENT_ID
+# FLUTTERWAVE_SECRET_KEY
+# VAPID_PRIVATE_KEY
+# ADMIN_SECRET
+# DAILY_API_KEY
+
+[triggers]
+crons = [
+  "*/5 * * * *",  # keep-alive (dev only — no-ops in production)
+  "0 6 * * *",    # stalled project scan (backup to Supabase pg_cron)
+]
