@@ -2,23 +2,22 @@ import { createMiddleware } from 'hono/factory'
 import { getSupabase } from '../lib/supabase'
 import type { Env } from '../types'
 
-// Extends Hono context with authenticated user
 type AuthVariables = {
   userId: string
   phone: string
   role: string
 }
 
-// Middleware: verify Supabase JWT from Authorization header
+// Verify Supabase JWT from Authorization header
 export const requireAuth = createMiddleware<{ Bindings: Env; Variables: AuthVariables }>(
   async (c, next) => {
     const authHeader = c.req.header('Authorization')
 
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    if (!authHeader?.startsWith('Bearer ')) {
       return c.json({ success: false, error: 'Missing auth token', code: 'UNAUTHORIZED' }, 401)
     }
 
-    const token = authHeader.replace('Bearer ', '')
+    const token    = authHeader.replace('Bearer ', '')
     const supabase = getSupabase(c.env)
 
     const { data: { user }, error } = await supabase.auth.getUser(token)
@@ -27,7 +26,6 @@ export const requireAuth = createMiddleware<{ Bindings: Env; Variables: AuthVari
       return c.json({ success: false, error: 'Invalid or expired token', code: 'UNAUTHORIZED' }, 401)
     }
 
-    // Check blacklist
     const { data: userData } = await supabase
       .from('users')
       .select('id, phone, role, is_blacklisted')
@@ -46,28 +44,26 @@ export const requireAuth = createMiddleware<{ Bindings: Env; Variables: AuthVari
     c.set('phone', userData.phone)
     c.set('role', userData.role)
 
-    await next()
+    return next()
   }
 )
 
-// Middleware: require provider role
+// Require provider role
 export const requireProvider = createMiddleware<{ Bindings: Env; Variables: AuthVariables }>(
   async (c, next) => {
-    const role = c.get('role')
-    if (role !== 'provider') {
+    if (c.get('role') !== 'provider') {
       return c.json({ success: false, error: 'Provider account required', code: 'FORBIDDEN' }, 403)
     }
-    await next()
+    return next()
   }
 )
 
-// Middleware: require admin role
+// Require admin role
 export const requireAdmin = createMiddleware<{ Bindings: Env; Variables: AuthVariables }>(
   async (c, next) => {
-    const role = c.get('role')
-    if (role !== 'admin') {
+    if (c.get('role') !== 'admin') {
       return c.json({ success: false, error: 'Admin access required', code: 'FORBIDDEN' }, 403)
     }
-    await next()
+    return next()
   }
 )
