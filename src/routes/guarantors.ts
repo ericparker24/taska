@@ -42,6 +42,36 @@ guarantors.post('/accept/:token',
 
     await supabase.from('guarantors').update({ status: 'accepted', accepted_at: new Date().toISOString() }).eq('id', token)
 
+    // Advance the booking — client can now proceed to fund milestone 1
+    const { data: booking } = await supabase
+      .from('bookings')
+      .update({ status: 'accepted' })
+      .eq('id', guarantor.booking_id)
+      .eq('status', 'awaiting_guarantor')
+      .select('id, client_id, provider_id')
+      .single()
+
+    if (booking) {
+      await supabase.from('notifications').insert({
+        user_id: booking.client_id,
+        type:    'guarantor_accepted',
+        title:   'Guarantor accepted!',
+        body:    'Your nominated guarantor has accepted. You can now fund the first milestone to begin.',
+        data:    { booking_id: booking.id },
+        is_read: false,
+      })
+
+      // System message into the shared three-way thread — first time all
+      // three parties (client, provider, guarantor) are actually connected.
+      await supabase.from('project_messages').insert({
+        booking_id:  booking.id,
+        sender_id:   guarantor.id,
+        sender_role: 'guarantor',
+        body:        'Guarantor has accepted and joined this project thread.',
+        is_system:   true,
+      })
+    }
+
     return c.json({
       success: true,
       data: {
